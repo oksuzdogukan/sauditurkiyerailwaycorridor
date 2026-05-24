@@ -1,0 +1,39 @@
+services:
+  # 1. Veritabanı Servisi
+  db:
+    image: mysql:8.0
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: sauditurkiyerailwaycorridor
+    ports:
+      - "3307:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+      # Bu satır, SQL dosyalarını okuyup DB'yi otomatik kurmasını sağlar!
+      - ./database:/docker-entrypoint-initdb.d
+
+  # 2. Node.js API Servisi
+  api:
+    build: ./backend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - db
+    environment:
+      # Node.js'in veritabanına bağlanması için gereken bilgiler
+      DB_HOST: db
+      DB_USER: root
+      DB_PASSWORD: rootpassword
+      DB_NAME: sauditurkiyerailwaycorridor
+
+  # 3. React Frontend Servisi
+  client:
+    build: ./frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+
+volumes:
+  db_data:
