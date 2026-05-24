@@ -327,7 +327,6 @@ app.get("/api/trains/search", async (req, res) => {
 
     const connection = await getConnection();
 
-    // Seçilen istasyonların ID'lerini kesin olarak bul (LIKE yerine birebir eşleşme çok daha güvenlidir)
     const [origRows] = await connection.execute(
       "SELECT StationID FROM station WHERE Name = ?",
       [fromStation],
@@ -337,7 +336,6 @@ app.get("/api/trains/search", async (req, res) => {
       [toStation],
     );
 
-    // Eğer isimler yanlışsa veya istasyon yoksa boş liste dön
     if (origRows.length === 0 || destRows.length === 0) {
       await connection.end();
       return res.json([]);
@@ -346,11 +344,11 @@ app.get("/api/trains/search", async (req, res) => {
     const fromId = origRows[0].StationID;
     const toId = destRows[0].StationID;
 
-    // SİHİRLİ SORGUMUZ: Route tablosuna, Seferlere (TrainSchedule) ve Trenlere bakıp doğru sonucu çeker
+    // DÜZELTME: t.Name yerine t.TrainName yazıldı ve 'active' küçük harfe çevrildi!
     const [rows] = await connection.execute(
       `SELECT ts.ScheduleID AS id, 
               t.TrainID AS trainId, 
-              t.Name AS trainName, 
+              t.TrainName AS trainName, 
               'Passenger' AS trainType,
               ss1.DepartureTime AS departureTime, 
               ss2.ArrivalTime AS arrivalTime,
@@ -366,7 +364,7 @@ app.get("/api/trains/search", async (req, res) => {
          AND r.DestinationStationID = ? 
          AND ts.DepartureDate = ? 
          AND ts.Status = 'scheduled' 
-         AND t.TrainStatus = 'Active'`,
+         AND t.TrainStatus = 'active'`,
       [fromId, toId, fromId, toId, travelDate],
     );
 
@@ -436,11 +434,12 @@ app.get("/api/trains/route-search", async (req, res) => {
 // ------------------------------------------------------------
 app.get("/api/trains/route-dates", async (req, res) => {
   try {
-    const { trainId, fromStation, toStation } = req.query;
-    if (!trainId || !fromStation || !toStation) {
+    // DÜZELTME: trainId zorunluluğu tamamen kaldırıldı!
+    const { fromStation, toStation } = req.query;
+    if (!fromStation || !toStation) {
       return res
         .status(400)
-        .json({ error: "trainId, fromStation, and toStation are required." });
+        .json({ error: "fromStation and toStation are required." });
     }
 
     const connection = await getConnection();
@@ -462,17 +461,18 @@ app.get("/api/trains/route-dates", async (req, res) => {
     const fromId = origRows[0].StationID;
     const toId = destRows[0].StationID;
 
-    // Sadece bu rotaya ait aktif ve geçmişte kalmamış tarihleri getir
+    // Sadece Nereden ve Nereye istasyonlarına uyan aktif sefer tarihleri
     const [dates] = await connection.execute(
       `SELECT DISTINCT ts.ScheduleID AS scheduleId, ts.DepartureDate AS departureDate
        FROM trainschedule ts
        JOIN route r ON ts.RouteID = r.RouteID
-       WHERE ts.TrainID = ?
-         AND r.OriginStationID = ?
+       JOIN train t ON ts.TrainID = t.TrainID
+       WHERE r.OriginStationID = ?
          AND r.DestinationStationID = ?
          AND ts.Status = 'scheduled'
+         AND t.TrainStatus = 'active'
          AND ts.DepartureDate >= CURDATE()`,
-      [trainId, fromId, toId],
+      [fromId, toId],
     );
 
     await connection.end();
