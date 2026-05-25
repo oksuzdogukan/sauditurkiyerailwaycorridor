@@ -319,32 +319,18 @@ app.post("/api/passenger/register", async (req, res) => {
 app.get("/api/trains/search", async (req, res) => {
   try {
     const { fromStation, toStation, travelDate } = req.query;
-    if (!fromStation || !toStation || !travelDate) {
-      return res.status(400).json({
-        error: "fromStation, toStation, and travelDate are required.",
-      });
-    }
-
     const connection = await getConnection();
 
-    const [origRows] = await connection.execute(
-      "SELECT StationID FROM station WHERE Name = ?",
-      [fromStation],
-    );
-    const [destRows] = await connection.execute(
-      "SELECT StationID FROM station WHERE Name = ?",
-      [toStation],
-    );
+    // İstasyon ID'lerini bul
+    const [orig] = await connection.execute("SELECT StationID FROM station WHERE Name = ?", [fromStation]);
+    const [dest] = await connection.execute("SELECT StationID FROM station WHERE Name = ?", [toStation]);
 
-    if (origRows.length === 0 || destRows.length === 0) {
-      await connection.end();
-      return res.json([]);
-    }
+    if (!orig.length || !dest.length) return res.json([]);
 
-    const fromId = origRows[0].StationID;
-    const toId = destRows[0].StationID;
+    const fromId = orig[0].StationID;
+    const toId = dest[0].StationID;
 
-    // DÜZELTME: t.Name yerine t.TrainName yazıldı ve 'active' küçük harfe çevrildi!
+    // Sadece ScheduleStop tablosunu kullanarak A'dan B'ye giden trenleri buluyoruz (Route tablosu yok!)
     const [rows] = await connection.execute(
       `SELECT ts.ScheduleID AS id, 
               t.TrainID AS trainId, 
@@ -357,15 +343,10 @@ app.get("/api/trains/search", async (req, res) => {
               ts.DepartureDate AS departureDate
        FROM trainschedule ts
        JOIN train t ON ts.TrainID = t.TrainID
-       JOIN route r ON ts.RouteID = r.RouteID
-       JOIN schedulestop ss1 ON ts.ScheduleID = ss1.ScheduleID AND ss1.StopSequence = 1
-       JOIN schedulestop ss2 ON ts.ScheduleID = ss2.ScheduleID AND ss2.StopSequence = 2
-       WHERE r.OriginStationID = ? 
-         AND r.DestinationStationID = ? 
-         AND ts.DepartureDate = ? 
-         AND ts.Status = 'scheduled' 
-         AND t.TrainStatus = 'active'`,
-      [fromId, toId, fromId, toId, travelDate],
+       JOIN schedulestop ss1 ON ts.ScheduleID = ss1.ScheduleID AND ss1.StopSequence = 1 AND ss1.StationID = ?
+       JOIN schedulestop ss2 ON ts.ScheduleID = ss2.ScheduleID AND ss2.StopSequence = 2 AND ss2.StationID = ?
+       WHERE ts.DepartureDate = ? AND ts.Status = 'scheduled' AND t.TrainStatus = 'active'`,
+      [fromId, toId, fromId, toId, travelDate]
     );
 
     await connection.end();
@@ -434,45 +415,22 @@ app.get("/api/trains/route-search", async (req, res) => {
 // ------------------------------------------------------------
 app.get("/api/trains/route-dates", async (req, res) => {
   try {
-    // DÜZELTME: trainId zorunluluğu tamamen kaldırıldı!
     const { fromStation, toStation } = req.query;
-    if (!fromStation || !toStation) {
-      return res
-        .status(400)
-        .json({ error: "fromStation and toStation are required." });
-    }
-
     const connection = await getConnection();
 
-    const [origRows] = await connection.execute(
-      "SELECT StationID FROM station WHERE Name = ?",
-      [fromStation],
-    );
-    const [destRows] = await connection.execute(
-      "SELECT StationID FROM station WHERE Name = ?",
-      [toStation],
-    );
+    const [orig] = await connection.execute("SELECT StationID FROM station WHERE Name = ?", [fromStation]);
+    const [dest] = await connection.execute("SELECT StationID FROM station WHERE Name = ?", [toStation]);
 
-    if (origRows.length === 0 || destRows.length === 0) {
-      await connection.end();
-      return res.json([]);
-    }
+    if (!orig.length || !dest.length) return res.json([]);
 
-    const fromId = origRows[0].StationID;
-    const toId = destRows[0].StationID;
-
-    // Sadece Nereden ve Nereye istasyonlarına uyan aktif sefer tarihleri
+    // Bu iki istasyon arasında gelecekte olan tüm sefer tarihleri
     const [dates] = await connection.execute(
       `SELECT DISTINCT ts.ScheduleID AS scheduleId, ts.DepartureDate AS departureDate
        FROM trainschedule ts
-       JOIN route r ON ts.RouteID = r.RouteID
-       JOIN train t ON ts.TrainID = t.TrainID
-       WHERE r.OriginStationID = ?
-         AND r.DestinationStationID = ?
-         AND ts.Status = 'scheduled'
-         AND t.TrainStatus = 'active'
-         AND ts.DepartureDate >= CURDATE()`,
-      [fromId, toId],
+       JOIN schedulestop ss1 ON ts.ScheduleID = ss1.ScheduleID AND ss1.StopSequence = 1 AND ss1.StationID = ?
+       JOIN schedulestop ss2 ON ts.ScheduleID = ss2.ScheduleID AND ss2.StopSequence = 2 AND ss2.StationID = ?
+       WHERE ts.Status = 'scheduled' AND ts.DepartureDate >= CURDATE()`,
+      [orig[0].StationID, dest[0].StationID]
     );
 
     await connection.end();
@@ -632,7 +590,8 @@ app.post("/api/passenger/cancel-reservation", async (req, res) => {
 
     // 1. Get current reservation details before canceling
     const [resDetails] = await connection.execute(
-      `SELECT r.TrainID, r.TravelDate, tk.CoachType, tk.SeatNumber, r.PassengerID, ts.ScheduleID
+      `SELECT r.TrainID, r.TravelDate, tk.CoachType, tk.SeatNumber, r.PassengerID, ts.ScheduleID,
+              r.FromStationID, r.ToStationID
        FROM reservation r
        LEFT JOIN ticket tk ON r.ReservationNumber = tk.ReservationNumber
        LEFT JOIN trainschedule ts ON r.TrainID = ts.TrainID AND ts.DepartureDate = r.TravelDate
@@ -645,7 +604,7 @@ app.post("/api/passenger/cancel-reservation", async (req, res) => {
       return res.status(404).json({ error: "Reservation not found." });
     }
 
-    const { TrainID, TravelDate, CoachType, SeatNumber, ScheduleID } =
+    const { TrainID, TravelDate, CoachType, SeatNumber, ScheduleID, FromStationID, ToStationID } =
       resDetails[0];
 
     // 2. Mark reservation and ticket as Canceled
@@ -707,12 +666,14 @@ app.post("/api/passenger/cancel-reservation", async (req, res) => {
         // Create promoted passenger reservation
         await connection.execute(
           `INSERT INTO reservation (ReservationNumber, PassengerID, TrainID, TravelDate, FromStationID, ToStationID, TotalAmount, PaymentStatus)
-           VALUES (?, ?, ?, ?, 1, 3, ?, 'Pending')`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending')`,
           [
             newReservationNumber,
             promotedPassenger.PassengerID,
             TrainID,
             TravelDate,
+            FromStationID,
+            ToStationID,
             ticketPrice,
           ],
         );
@@ -770,7 +731,11 @@ app.get("/api/passenger/:id/reservations", async (req, res) => {
               tk.TicketID AS ticketId,
               r.TravelDate AS travelDate, 
               r.TotalAmount AS totalAmount, 
-              IF(r.PaymentStatus = 'Completed', 'Paid', 'Pending Payment') AS status,
+              CASE r.PaymentStatus
+                WHEN 'Completed' THEN 'Paid'
+                WHEN 'Canceled' THEN 'Canceled'
+                ELSE 'Pending Payment'
+              END AS status,
               t.Name AS trainName,
               s_from.Name AS fromStation,
               s_to.Name AS toStation,
@@ -904,7 +869,7 @@ app.put("/api/admin/trains/:id", async (req, res) => {
     const connection = await getConnection();
 
     // Rule: "Bir treni veya ray hattını 'kullanılamaz/servis dışı' olarak işaretlemeden önce, sisteme mutlaka bir bakım kaydı girmeyi zorunlu kılmalı."
-    if (trainStatus === "Out of Service") {
+    if (trainStatus === "Out of Service" || trainStatus === "Maintenance") {
       const [records] = await connection.execute(
         `SELECT * FROM maintenancerecord 
          WHERE TrainID = ? AND MaintenanceStatus = 'In Progress'`,
@@ -915,7 +880,7 @@ app.put("/api/admin/trains/:id", async (req, res) => {
         await connection.end();
         return res.status(400).json({
           message:
-            "Enforcement Policy: You must log a maintenance ticket and mark it in progress before setting this train to 'Out of Service'.",
+            "Enforcement Policy: You must log a maintenance ticket and mark it in progress before setting this train to 'Out of Service' or 'Maintenance'.",
         });
       }
     }
@@ -1238,9 +1203,13 @@ app.get("/api/admin/maintenance", async (req, res) => {
     const [rows] = await connection.execute(
       `SELECT mr.RecordID AS id, mr.TrainID, mr.TrackID, mr.MaintenanceDate AS startDate,
               mr.Description, mr.MaintenanceStatus AS status,
-              t.Name AS trainName
+              t.Name AS trainName,
+              CONCAT(s_start.Name, ' - ', s_end.Name) AS trackName
        FROM maintenancerecord mr
-       LEFT JOIN train t ON mr.TrainID = t.TrainID`,
+       LEFT JOIN train t ON mr.TrainID = t.TrainID
+       LEFT JOIN tracksegment ts ON mr.TrackID = ts.TrackID
+       LEFT JOIN station s_start ON ts.StartStationID = s_start.StationID
+       LEFT JOIN station s_end ON ts.EndStationID = s_end.StationID`,
     );
     await connection.end();
     res.json(sanitizeRows(rows));
@@ -1334,8 +1303,7 @@ app.post("/api/system/update-loyalty", async (req, res) => {
        SET LoyaltyClass = CASE
          WHEN LoyaltyMiles >= 100000 THEN 'Gold'
          WHEN LoyaltyMiles >= 50000  THEN 'Silver'
-         WHEN LoyaltyMiles >= 10000  THEN 'Green'
-         ELSE 'Regular'
+         ELSE 'Green'
        END`,
     );
     await connection.end();
